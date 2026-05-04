@@ -1,0 +1,6 @@
+requests
+scapy
+colorama
+flask
+psutil
+cryptography.fernet
