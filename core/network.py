@@ -1,6 +1,11 @@
+import ipaddress
+import platform
 import socket
+import subprocess
+
 import requests
-from datetime import datetime
+
+DEFAULT_PORTS = (21, 22, 80, 443, 445, 3389)
 
 class NetworkManager:
     """Regroupe les outils de scan technique et d'intelligence OSINT."""
@@ -17,25 +22,54 @@ class NetworkManager:
         }
 
     # --- PARTIE 1 : SCANNER TECHNIQUE ---
-    
-    def port_scan(self, target_ip, ports=[21, 22, 80, 443, 445, 3389]):
+
+    @staticmethod
+    def is_valid_ip(target_ip):
+        try:
+            ipaddress.ip_address(target_ip)
+            return True
+        except ValueError:
+            return False
+
+    def ping_scan(self, target_ip, timeout=2):
+        """Vérifie si l'hôte répond (ICMP via la commande ping, puis repli TCP)."""
+        if not self.is_valid_ip(target_ip):
+            print(f"[!] Adresse IP invalide : {target_ip}")
+            return False
+
+        count_flag = "-n" if platform.system().lower() == "windows" else "-c"
+        try:
+            result = subprocess.run(
+                ["ping", count_flag, "1", target_ip],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout + 1,
+            )
+            if result.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Repli : l'ICMP est souvent filtré, on tente une connexion TCP rapide.
+        return bool(self.port_scan(target_ip, ports=(80, 443, 22, 445), verbose=False))
+
+    def port_scan(self, target_ip, ports=DEFAULT_PORTS, verbose=True):
         """Scanne les ports ouverts pour identifier la surface d'attaque."""
         open_ports = []
-        print(f"[*] Scan technique en cours sur {target_ip}...")
-        
+        if verbose:
+            print(f"[*] Scan technique en cours sur {target_ip}...")
+
+        family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
         for port in ports:
             try:
-                # Création d'un socket TCP
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(0.5) # Timeout rapide pour l'efficacité
-                
-                # connect_ex renvoie 0 si le port est ouvert
-                result = sock.connect_ex((target_ip, port))
-                if result == 0:
-                    open_ports.append(port)
-                sock.close()
-            except Exception as e:
-                print(f"[!] Erreur sur le port {port}: {e}")
+                with socket.socket(family, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(0.5)  # Timeout rapide pour l'efficacité
+                    # connect_ex renvoie 0 si le port est ouvert
+                    if sock.connect_ex((target_ip, port)) == 0:
+                        open_ports.append(port)
+            except OSError as e:
+                if verbose:
+                    print(f"[!] Erreur sur le port {port}: {e}")
                 
         return open_ports
 

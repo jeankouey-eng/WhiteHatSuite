@@ -1,16 +1,32 @@
 from flask import Flask, render_template, request, redirect, url_for, session
+import hmac
 import json
 import os
+import secrets
 from datetime import datetime
 from cryptography.fernet import Fernet
 from core.crypto_vault import CryptoVault
 
-app = Flask(__name__)
-app.secret_key = "CLE_ULTRA_SECRETE_A_CHANGER" # Nécessaire pour les sessions
-vault = CryptoVault()  # Initialise le coffre-fort (charge la clé)
-LOG_FILE = "logs/captures.json"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-ADMIN_CREDENTIALS = {"admin": "WhiteHat2026!"}
+app = Flask(__name__)
+# Clé de session : variable d'environnement, sinon aléatoire (sessions perdues au redémarrage)
+app.secret_key = os.environ.get("WHS_SECRET_KEY") or secrets.token_hex(32)
+vault = CryptoVault()  # Coffre-fort (clé chargée ou générée au premier usage)
+LOG_FILE = os.path.join(BASE_DIR, "logs", "captures.json")
+
+ADMIN_USER = os.environ.get("WHS_ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ.get("WHS_ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    ADMIN_PASSWORD = secrets.token_urlsafe(12)
+    print(f"[!] WHS_ADMIN_PASSWORD non défini. Mot de passe temporaire pour '{ADMIN_USER}' : {ADMIN_PASSWORD}")
+
+
+def check_credentials(user, pw):
+    """Comparaison en temps constant pour éviter les attaques temporelles."""
+    if not user or not pw:
+        return False
+    return hmac.compare_digest(user, ADMIN_USER) and hmac.compare_digest(pw, ADMIN_PASSWORD)
 
 
 def save_secure_capture(new_entry):
@@ -40,14 +56,14 @@ def save_secure_capture(new_entry):
     with open(LOG_FILE, "wb") as file:
         file.write(encrypted_final)
     
-    print(f"[+] Donnée sécurisée et stockée.")
+    print("[+] Donnée sécurisée et stockée.")
 
 @app.route('/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
         user = request.form.get('username')
         pw = request.form.get('password')
-        if ADMIN_CREDENTIALS.get(user) == pw:
+        if check_credentials(user, pw):
             session['logged_in'] = True
             return redirect(url_for('dashboard'))
     return '''
@@ -63,6 +79,10 @@ def dashboard():
     if not session.get('logged_in'):
         return redirect(url_for('admin_login'))
     
+    captures = []
+    if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
+        return render_template('index.html', captures=captures)
+
     try:
         # 1. On lit les données chiffrées
         with open(LOG_FILE, "rb") as f:
@@ -74,6 +94,7 @@ def dashboard():
 
         # 3. Conversion en liste Python pour le template
         captures = json.loads(decrypted_data)
+        captures.reverse()  # Entrées les plus récentes en premier
     except Exception as e:
         print(f"Erreur de lecture ou fichier non chiffré : {e}")
         captures = []

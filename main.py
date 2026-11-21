@@ -1,10 +1,9 @@
 import threading
 import os
 import sys
-from core.network import NetworkTools 
+from core.network import NetworkManager
 from core.scanner import SystemScanner
 from serveur.app import run_server
-from core.crypto_vault import CryptoVault
 
 def display_banner():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -28,7 +27,7 @@ def main():
 
     # 2. Initialisation des outils
     sys_scanner = SystemScanner()
-    net = NetworkTools()
+    net = NetworkManager(api_key=os.environ.get("ABUSEIPDB_API_KEY"))
 
     while True:
         try:
@@ -41,12 +40,17 @@ def main():
 
             if choix == "1":
                 print("[*] Analyse des clés de démarrage...")
+                if not sys_scanner.hives:
+                    print("  [-] Fonction disponible uniquement sous Windows.")
+                    continue
                 results = sys_scanner.check_persistence()
+                if not results:
+                    print("  [-] Aucune entrée de démarrage trouvée.")
                 for item in results:
-                    print(f"  [!] Trouvé ({item['hive']}) : {item['name']}")
+                    print(f"  [!] Trouvé ({item['hive']}) : {item['name']} -> {item['path']}")
 
             elif choix == "2":
-                target = input("IP à scanner :")
+                target = input("IP à scanner : ").strip()
                 if net.ping_scan(target):
                     print(f"[+] {target} est EN LIGNE.")
                     # On lance le scan de ports si la machine répond
