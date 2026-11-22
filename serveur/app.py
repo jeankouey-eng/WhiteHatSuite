@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import secrets
+import threading
 from datetime import datetime
 from cryptography.fernet import Fernet
 from core.crypto_vault import CryptoVault
@@ -10,10 +11,13 @@ from core.crypto_vault import CryptoVault
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # Refuse les requêtes > 64 Ko (code 413)
+LOG_LOCK = threading.Lock()
+DASHBOARD_LIMIT = 500  # Nombre max de lignes affichées sur le dashboard
 # Clé de session : variable d'environnement, sinon aléatoire (sessions perdues au redémarrage)
 app.secret_key = os.environ.get("WHS_SECRET_KEY") or secrets.token_hex(32)
-vault = CryptoVault()  # Coffre-fort (clé chargée ou générée au premier usage)
-LOG_FILE = os.path.join(BASE_DIR, "logs", "captures.json")
+vault = CryptoVault(key_file=os.environ.get("WHS_KEY_FILE"))  # Coffre-fort (clé chargée ou générée au premier usage)
+LOG_FILE = os.environ.get("WHS_LOG_FILE") or os.path.join(BASE_DIR, "logs", "captures.json")
 
 ADMIN_USER = os.environ.get("WHS_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("WHS_ADMIN_PASSWORD")
@@ -30,33 +34,55 @@ def check_credentials(user, pw):
 
 
 def save_secure_capture(new_entry):
-    f = Fernet(vault.key)
-    
-    # 1. Charger l'existant ou créer une liste vide
-    if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
-        try:
-            with open(LOG_FILE, "rb") as file:
-                encrypted_content = file.read()
-            # Déchiffrement pour modification
-            decrypted_content = f.decrypt(encrypted_content)
-            data_list = json.loads(decrypted_content)
-        except Exception:
-            data_list = []  # En cas d'erreur, on repart à zéro
-    else:
-        data_list = []
+    """Ajoute une capture chiffrée en fin de log (une ligne = une entrée).
 
-    # 2. Ajouter la nouvelle entrée avec un timestamp
+    On n'ajoute qu'une ligne : le coût reste constant même avec un très gros log,
+    et une ligne abîmée n'empêche pas de lire les autres.
+    """
     new_entry["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data_list.append(new_entry)
+    token = Fernet(vault.key).encrypt(json.dumps(new_entry).encode())
 
-    # 3. Chiffrer et sauvegarder le tout
-    updated_json = json.dumps(data_list).encode()
-    encrypted_final = f.encrypt(updated_json)
-    
-    with open(LOG_FILE, "wb") as file:
-        file.write(encrypted_final)
-    
+    # Flask traite les requêtes en parallèle : une écriture à la fois.
+    with LOG_LOCK:
+        with open(LOG_FILE, "ab+") as file:
+            # Un log de l'ancien format ne finit pas par un saut de ligne : on l'ajoute.
+            file.seek(0, os.SEEK_END)
+            if file.tell() > 0:
+                file.seek(-1, os.SEEK_END)
+                if file.read(1) != b"\n":
+                    file.write(b"\n")
+            file.write(token + b"\n")
+
     print("[+] Donnée sécurisée et stockée.")
+
+
+def read_captures(limit=None):
+    """Retourne (entrées les plus récentes en premier, nombre total d'entrées)."""
+    if not os.path.exists(LOG_FILE):
+        return [], 0
+
+    with LOG_LOCK:
+        with open(LOG_FILE, "rb") as file:
+            lines = [line.strip() for line in file if line.strip()]
+
+    fernet = Fernet(vault.key)
+    total = 0
+    decoded = []
+    for line in lines:
+        try:
+            data = json.loads(fernet.decrypt(line))
+        except Exception:
+            continue  # ligne illisible (autre clé, fichier abîmé) : on l'ignore
+        # Ancien format : tout le log dans un seul bloc chiffré contenant une liste
+        entries = data if isinstance(data, list) else [data]
+        total += len(entries)
+        decoded.extend(entries)
+
+    if limit is not None:
+        decoded = decoded[-limit:]
+    decoded.reverse()
+    return decoded, total
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def admin_login():
@@ -79,33 +105,15 @@ def dashboard():
     if not session.get('logged_in'):
         return redirect(url_for('admin_login'))
     
-    captures = []
-    if not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0:
-        return render_template('index.html', captures=captures)
-
-    try:
-        # 1. On lit les données chiffrées
-        with open(LOG_FILE, "rb") as f:
-            encrypted_data = f.read()
-
-        # 2. Déchiffrement immédiat en mémoire (on ne touche pas au fichier sur le disque)
-        fernet = Fernet(vault.key)
-        decrypted_data = fernet.decrypt(encrypted_data)
-
-        # 3. Conversion en liste Python pour le template
-        captures = json.loads(decrypted_data)
-        captures.reverse()  # Entrées les plus récentes en premier
-    except Exception as e:
-        print(f"Erreur de lecture ou fichier non chiffré : {e}")
-        captures = []
-
-    return render_template('index.html', captures=captures)
-
+    captures, total = read_captures(limit=DASHBOARD_LIMIT)
+    return render_template('index.html', captures=captures, total=total)
 
 @app.route('/capture_pong', methods=['POST'])
 def capture_pong():
     # Récupération des données du téléphone
-    data = request.get_json(silent=True) or {"info": "Données brutes"}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {"info": "Données brutes"}
     data["ip_origine"] = request.remote_addr
 
     # Sauvegarde chiffrée
@@ -119,4 +127,5 @@ def capture_pong():
 
 def run_server():
     """Démarre le serveur Flask en mode threadé."""
-    app.run(host='127.0.0.1', port=5000, debug=False)
+    port = int(os.environ.get("WHS_PORT", "5000"))
+    app.run(host='127.0.0.1', port=port, debug=False, threaded=True)
