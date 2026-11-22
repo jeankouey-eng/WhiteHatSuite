@@ -1,6 +1,12 @@
 __pycache__/
 *.key
+*.key.tmp
 .env
 instance/
 .venv/
 .venv-1/
+.pytest_cache/
+
+# Données capturées : ne jamais les versionner
+logs/*
+!logs/.gitkeep

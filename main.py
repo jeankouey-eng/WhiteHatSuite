@@ -1,10 +1,9 @@
 import threading
 import os
 import sys
-from core.network import NetworkTools 
+from core.network import NetworkManager
 from core.scanner import SystemScanner
 from serveur.app import run_server
-from core.crypto_vault import CryptoVault
 
 def display_banner():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -18,7 +17,30 @@ def display_banner():
     """ + "\033[0m")
     print("    [ VERSION 1.0 - MODE PROFESSIONNEL ]\n")
 
+def run_server_only():
+    """Mode serveur seul : pas de menu, idéal pour laisser tourner en continu."""
+    port = os.environ.get("WHS_PORT", "5000")
+    print(f"[*] Mode serveur seul. Dashboard : http://127.0.0.1:{port} (Ctrl+C pour arrêter)")
+    try:
+        run_server()
+    except KeyboardInterrupt:
+        print("\n[*] Serveur arrêté.")
+
+
+def keep_server_alive(web_thread):
+    """Plus de console disponible : on garde le serveur actif au lieu de tout arrêter."""
+    print("\n[*] Aucune console détectée, le serveur web continue de tourner.")
+    try:
+        web_thread.join()
+    except KeyboardInterrupt:
+        print("\n[*] Serveur arrêté.")
+
+
 def main():
+    if "--serveur" in sys.argv[1:]:
+        run_server_only()
+        return
+
     display_banner()
 
     # 1. Démarrage de l'interface Dashboard en tâche de fond (Thread)
@@ -28,7 +50,7 @@ def main():
 
     # 2. Initialisation des outils
     sys_scanner = SystemScanner()
-    net = NetworkTools()
+    net = NetworkManager(api_key=os.environ.get("ABUSEIPDB_API_KEY"))
 
     while True:
         try:
@@ -37,16 +59,29 @@ def main():
             print("2. Lancer un test réseau")
             print("3. Quitter")
             
-            choix = input("\nAction > ")
+            try:
+                choix = input("\nAction > ")
+            except EOFError:
+                keep_server_alive(web_thread)
+                break
 
             if choix == "1":
                 print("[*] Analyse des clés de démarrage...")
+                if not sys_scanner.hives:
+                    print("  [-] Fonction disponible uniquement sous Windows.")
+                    continue
                 results = sys_scanner.check_persistence()
+                if not results:
+                    print("  [-] Aucune entrée de démarrage trouvée.")
                 for item in results:
-                    print(f"  [!] Trouvé ({item['hive']}) : {item['name']}")
+                    print(f"  [!] Trouvé ({item['hive']}) : {item['name']} -> {item['path']}")
 
             elif choix == "2":
-                target = input("IP à scanner :")
+                try:
+                    target = input("IP à scanner : ").strip()
+                except EOFError:
+                    keep_server_alive(web_thread)
+                    break
                 if net.ping_scan(target):
                     print(f"[+] {target} est EN LIGNE.")
                     # On lance le scan de ports si la machine répond

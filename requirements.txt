@@ -3,4 +3,4 @@ scapy
 colorama
 flask
 psutil
-cryptography.fernet
+cryptography
